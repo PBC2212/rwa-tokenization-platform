@@ -3,9 +3,9 @@ const { ethers } = require("hardhat");
 async function main() {
   console.log("🔐 Granting roles to backend signer...\n");
 
-  // Contract addresses from your deployment
-  const PLEDGE_MANAGER_ADDRESS = "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6";
-  const RWA_TOKEN_ADDRESS = "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853";
+  // Contract addresses from your NEW deployment
+  const PLEDGE_MANAGER_ADDRESS = "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9";
+  const RWA_TOKEN_ADDRESS = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
   
   // Backend signer address that needs roles
   const BACKEND_SIGNER = "0x7931edfa6255d59aee5a65d26e6a7e3cf30e8339";

@@ -4,8 +4,8 @@ async function main() {
   console.log("🔐 Granting roles to backend signer...\n");
 
   // Contract addresses from your NEW deployment
-  const PLEDGE_MANAGER_ADDRESS = "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9";
-  const RWA_TOKEN_ADDRESS = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
+  const PLEDGE_MANAGER_ADDRESS = "0xc8d56346BFe74EB0F418d1517BABe4A03412FA5D";
+  const RWA_TOKEN_ADDRESS = "0xf2D6c635AFc942780Fa0Afb55aFE2Fa6d8d23d35";
   
   // Backend signer address that needs roles
   const BACKEND_SIGNER = "0x7931edfa6255d59aee5a65d26e6a7e3cf30e8339";

@@ -7,37 +7,36 @@ async function main() {
   // Get the deployer account
   const [deployer] = await ethers.getSigners();
   console.log("Deploying contracts with account:", deployer.address);
-  console.log("Account balance:", ethers.utils.formatEther(await deployer.getBalance()), "MATIC\n");
+  console.log(
+    "Account balance:",
+    ethers.utils.formatEther(await deployer.getBalance()),
+    "MATIC\n"
+  );
 
   // USDT contract address on Polygon mainnet
-  // For Amoy testnet, you'll need to use a test USDT or deploy a mock USDT
   const POLYGON_USDT = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"; // Polygon mainnet
-  const AMOY_USDT = "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582"; // Amoy testnet (example)
   
   // Determine which USDT to use based on network
   const network = await hre.network.provider.send("eth_chainId");
   let usdtAddress;
-  
+
   if (network === "0x89") { // Polygon mainnet
     usdtAddress = POLYGON_USDT;
     console.log("📍 Deploying to Polygon Mainnet");
-  } else if (network === "0x13882") { // Amoy testnet
-    usdtAddress = AMOY_USDT;
-    console.log("📍 Deploying to Amoy Testnet");
   } else {
-    // For local development, deploy a mock USDT
-    console.log("📍 Deploying to Local Network - Deploying Mock USDT");
+    // For testnet and local development, always deploy mock USDT
+    console.log("📍 Deploying Mock USDT to testnet/local");
     const MockUSDT = await ethers.getContractFactory("MockUSDT");
     const mockUSDT = await MockUSDT.deploy();
     await mockUSDT.deployed();
     usdtAddress = mockUSDT.address;
     console.log("Mock USDT deployed to:", usdtAddress);
-    
+
     // Mint some USDT to deployer for testing
     await mockUSDT.mint(deployer.address, ethers.utils.parseUnits("1000000", 6)); // 1M USDT
     console.log("Minted 1,000,000 USDT to deployer for testing");
   }
-  
+
   console.log("Using USDT at address:", usdtAddress, "\n");
 
   try {
@@ -77,7 +76,7 @@ async function main() {
     console.log("✅ Granted MINTER_ROLE to PledgeManager on RWAToken");
 
     // Fund PledgeManager with USDT for client payments (if using MockUSDT)
-    if (network !== "0x89" && network !== "0x13882") {
+    if (network !== "0x89") {
       const mockUSDT = await ethers.getContractAt("MockUSDT", usdtAddress);
       const fundAmount = ethers.utils.parseUnits("500000", 6); // 500K USDT
       await mockUSDT.transfer(pledgeManager.address, fundAmount);

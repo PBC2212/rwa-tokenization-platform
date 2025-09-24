@@ -3,6 +3,9 @@ const cors = require('cors');
 const { ethers } = require('ethers');
 const path = require('path');
 const FireblocksService = require('./services/FireblocksService');
+const SupabaseService = require('./services/SupabaseService');
+const DatabaseSyncService = require('./services/DatabaseSyncService');
+const DatabaseQueryService = require('./services/DatabaseQueryService');
 require('dotenv').config();
 
 // Import contract ABIs with error handling
@@ -18,8 +21,11 @@ try {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Initialize Fireblocks service
+// Initialize services
 const fireblocksService = new FireblocksService();
+const supabaseService = new SupabaseService();
+let dbSyncService;
+let dbQueryService;
 
 // Middleware
 const corsOptions = {
@@ -39,14 +45,15 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    fireblocks: fireblocksService.isInitialized()
+    fireblocks: fireblocksService.isInitialized(),
+    supabase: supabaseService.isInitialized()
   });
 });
 
 // Blockchain configuration
 let provider, operatorAddress, financeAddress;
 
-// Initialize blockchain and Fireblocks connection
+// Initialize blockchain and all services
 async function initializeServices() {
   try {
     console.log('🔄 Initializing services...');
@@ -111,6 +118,23 @@ async function initializeServices() {
       const balance = await wallet.getBalance();
       console.log('💰 Development wallet:', operatorAddress);
       console.log('💰 Balance:', ethers.utils.formatEther(balance), 'MATIC');
+    }
+
+    // Initialize Supabase and database services
+    try {
+      await supabaseService.initialize();
+      console.log('✅ Supabase service initialized');
+      
+      // Initialize Database Sync Service
+      dbSyncService = new DatabaseSyncService(supabaseService);
+      console.log('✅ Database sync service initialized');
+      
+      // Initialize Database Query Service
+      dbQueryService = new DatabaseQueryService(supabaseService);
+      console.log('✅ Database query service initialized');
+    } catch (error) {
+      console.log('⚠️ Supabase initialization failed:', error.message);
+      // Continue without Supabase for now
     }
     
     // Verify contract addresses
@@ -241,9 +265,9 @@ async function executeContractTransaction(contractAddress, abi, methodName, para
     if (isAmoyTestnet) {
       // Amoy testnet requires higher gas prices
       gasSettings = {
-        maxFeePerGas: ethers.utils.parseUnits('50', 'gwei'),      // 50 gwei max fee
-        maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei'), // 30 gwei priority fee
-        gasLimit: 2000000  // Higher gas limit for complex transactions
+        maxFeePerGas: ethers.utils.parseUnits('50', 'gwei'),
+        maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei'),
+        gasLimit: 2000000
       };
       
       console.log('🔥 Using Amoy testnet gas settings:', {
@@ -291,7 +315,10 @@ app.get('/api/health', async (req, res) => {
       environment: process.env.NODE_ENV || 'development',
       services: {
         provider: !!provider,
-        fireblocks: fireblocksService.isInitialized()
+        fireblocks: fireblocksService.isInitialized(),
+        supabase: supabaseService.isInitialized(),
+        dbSync: !!dbSyncService,
+        dbQuery: !!dbQueryService
       }
     };
     
@@ -444,6 +471,33 @@ app.post('/api/pledge/create', async (req, res) => {
     const pledgeManager = new ethers.Contract(process.env.PLEDGE_MANAGER_ADDRESS, PledgeManagerABI.abi, provider);
     const pledgeDetails = await pledgeManager.getPledgeAgreement(agreementId);
     
+    // Sync to database
+    try {
+      if (dbSyncService) {
+        await dbSyncService.syncPledgeCreation({
+          agreementId: pledgeDetails.agreementId,
+          client: pledgeDetails.client,
+          assetId: pledgeDetails.assetId,
+          assetType: pledgeDetails.assetType,
+          description: pledgeDetails.description,
+          originalValue: pledgeDetails.originalValue.toString(),
+          discountedValue: pledgeDetails.discountedValue.toString(),
+          tokensIssued: pledgeDetails.tokensIssued.toString(),
+          clientPayment: pledgeDetails.clientPayment.toString(),
+          status: pledgeDetails.status,
+          documentHash: pledgeDetails.documentHash
+        }, {
+          txHash: result.txHash,
+          contractAddress: process.env.PLEDGE_MANAGER_ADDRESS,
+          from: operatorAddress,
+          to: process.env.PLEDGE_MANAGER_ADDRESS
+        });
+      }
+    } catch (syncError) {
+      console.log('⚠️ Database sync failed:', syncError.message);
+      // Continue anyway - transaction succeeded
+    }
+    
     res.json({
       success: true,
       agreementId,
@@ -501,6 +555,28 @@ app.post('/api/pledge/pay-client', async (req, res) => {
     console.log(`✅ Client payment processed successfully`);
     console.log(`🔗 Transaction hash: ${result.txHash}`);
     
+    // Sync to database
+    try {
+      if (dbSyncService) {
+        const pledgeManager = new ethers.Contract(process.env.PLEDGE_MANAGER_ADDRESS, PledgeManagerABI.abi, provider);
+        const pledgeDetails = await pledgeManager.getPledgeAgreement(agreementId);
+        
+        await dbSyncService.syncClientPayment(
+          agreementId,
+          pledgeDetails.client,
+          pledgeDetails.clientPayment.toString(),
+          {
+            txHash: result.txHash,
+            contractAddress: process.env.PLEDGE_MANAGER_ADDRESS,
+            from: operatorAddress,
+            to: pledgeDetails.client
+          }
+        );
+      }
+    } catch (syncError) {
+      console.log('⚠️ Database sync failed:', syncError.message);
+    }
+    
     res.json({
       success: true,
       transactionHash: result.txHash,
@@ -514,7 +590,7 @@ app.post('/api/pledge/pay-client', async (req, res) => {
   }
 });
 
-// Purchase tokens (investor endpoint) - Updated for proper USDT handling
+// Purchase tokens (investor endpoint)
 app.post('/api/tokens/purchase', async (req, res) => {
   try {
     const { agreementId, tokenAmount, investorAddress } = req.body;
@@ -560,6 +636,27 @@ app.post('/api/tokens/purchase', async (req, res) => {
         console.log('⚠️ Token transfer to investor failed:', transferError.message);
         // Continue anyway - tokens are still purchased, just in backend wallet
       }
+    }
+    
+    // Sync to database
+    try {
+      if (dbSyncService) {
+        const usdtRequired = tokenAmount * 1000000; // Convert to USDT (6 decimals)
+        await dbSyncService.syncTokenPurchase({
+          purchaseId,
+          agreementId,
+          investorAddress: investorAddress,
+          tokenAmount: tokenAmount.toString(),
+          usdtPaid: usdtRequired.toString()
+        }, {
+          txHash: result.txHash,
+          contractAddress: process.env.PLEDGE_MANAGER_ADDRESS,
+          from: operatorAddress,
+          to: investorAddress
+        });
+      }
+    } catch (syncError) {
+      console.log('⚠️ Database sync failed:', syncError.message);
     }
     
     console.log(`✅ Token purchase completed. Transaction: ${result.txHash}`);
@@ -662,6 +759,225 @@ app.get('/api/client/:address/pledges', async (req, res) => {
   }
 });
 
+// ==================== DATABASE API ROUTES ====================
+
+// Basic database queries (from previous step)
+app.get('/api/database/pledges', async (req, res) => {
+  try {
+    if (!dbSyncService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database service not available' });
+    }
+
+    const { clientAddress, status, limit } = req.query;
+    const filters = {};
+    
+    if (clientAddress) filters.clientAddress = clientAddress;
+    if (status !== undefined) filters.status = parseInt(status);
+    if (limit) filters.limit = parseInt(limit);
+
+    const pledges = await dbSyncService.getPledgeAgreements(filters);
+    
+    res.json({
+      success: true,
+      pledges: pledges
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch pledges from database', details: error.message });
+  }
+});
+
+app.get('/api/database/purchases', async (req, res) => {
+  try {
+    if (!dbSyncService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database service not available' });
+    }
+
+    const { investorAddress, agreementId, limit } = req.query;
+    const filters = {};
+    
+    if (investorAddress) filters.investorAddress = investorAddress;
+    if (agreementId) filters.agreementId = agreementId;
+    if (limit) filters.limit = parseInt(limit);
+
+    const purchases = await dbSyncService.getInvestorPurchases(filters);
+    
+    res.json({
+      success: true,
+      purchases: purchases
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch purchases from database', details: error.message });
+  }
+});
+
+app.get('/api/database/analytics', async (req, res) => {
+  try {
+    if (!dbSyncService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database service not available' });
+    }
+
+    const days = parseInt(req.query.days) || 30;
+    const analytics = await dbSyncService.getPlatformAnalytics(days);
+    
+    res.json({
+      success: true,
+      analytics: analytics
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch analytics from database', details: error.message });
+  }
+});
+
+// ==================== ADVANCED ANALYTICS API ROUTES ====================
+
+// Advanced Analytics Dashboard
+app.get('/api/dashboard', async (req, res) => {
+  try {
+    if (!dbQueryService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database query service not available' });
+    }
+
+    const dashboardData = await dbQueryService.getDashboardData();
+    
+    res.json({
+      success: true,
+      dashboard: dashboardData
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch dashboard data', details: error.message });
+  }
+});
+
+// Pledge Performance Analytics
+app.get('/api/analytics/pledge-performance', async (req, res) => {
+  try {
+    if (!dbQueryService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database query service not available' });
+    }
+
+    const performance = await dbQueryService.getPledgePerformance();
+    
+    res.json({
+      success: true,
+      performance: performance
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch pledge performance', details: error.message });
+  }
+});
+
+// Investor Activity Analytics
+app.get('/api/analytics/investor-activity', async (req, res) => {
+  try {
+    if (!dbQueryService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database query service not available' });
+    }
+
+    const { address } = req.query;
+    const activity = await dbQueryService.getInvestorActivity(address);
+    
+    res.json({
+      success: true,
+      activity: activity
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch investor activity', details: error.message });
+  }
+});
+
+// Time Series Data for Charts
+app.get('/api/analytics/time-series', async (req, res) => {
+  try {
+    if (!dbQueryService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database query service not available' });
+    }
+
+    const days = parseInt(req.query.days) || 30;
+    const timeSeriesData = await dbQueryService.getTimeSeriesData(days);
+    
+    res.json({
+      success: true,
+      timeSeries: timeSeriesData
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch time series data', details: error.message });
+  }
+});
+
+// Search Transactions
+app.get('/api/search', async (req, res) => {
+  try {
+    if (!dbQueryService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database query service not available' });
+    }
+
+    const { q: searchQuery, type = 'all' } = req.query;
+    
+    if (!searchQuery) {
+      return res.status(400).json({ error: 'Search query is required' });
+    }
+
+    const results = await dbQueryService.searchTransactions(searchQuery, type);
+    
+    res.json({
+      success: true,
+      query: searchQuery,
+      type: type,
+      results: results
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Search failed', details: error.message });
+  }
+});
+
+// Transaction Logs with Advanced Filtering
+app.get('/api/logs/transactions', async (req, res) => {
+  try {
+    if (!dbQueryService || !supabaseService.isInitialized()) {
+      return res.status(503).json({ error: 'Database query service not available' });
+    }
+
+    const filters = {
+      transactionType: req.query.type,
+      status: req.query.status,
+      fromAddress: req.query.from,
+      toAddress: req.query.to,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      limit: parseInt(req.query.limit) || 50,
+      offset: parseInt(req.query.offset) || 0
+    };
+
+    // Remove undefined values
+    Object.keys(filters).forEach(key => {
+      if (filters[key] === undefined) {
+        delete filters[key];
+      }
+    });
+
+    const logs = await dbQueryService.getTransactionLogs(filters);
+    
+    res.json({
+      success: true,
+      filters: filters,
+      logs: logs
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch transaction logs', details: error.message });
+  }
+});
+
+// ==================== FIREBLOCKS API ROUTES ====================
+
 // Get Fireblocks transaction history
 app.get('/api/fireblocks/transactions', async (req, res) => {
   try {
@@ -706,6 +1022,8 @@ app.get('/api/fireblocks/wallet', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch wallet info', details: error.message });
   }
 });
+
+// ==================== TESTING/DEVELOPMENT ROUTES ====================
 
 // USDT faucet for testing (only in development)
 app.post('/api/faucet/usdt', async (req, res) => {
@@ -766,14 +1084,17 @@ async function startServer() {
     await initializeServices();
     
     app.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 RWA Backend API with Fireblocks running on port ${PORT}`);
+      console.log(`🚀 RWA Backend API with Fireblocks & Supabase running on port ${PORT}`);
       console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`📍 CORS enabled for: ${process.env.CORS_ORIGIN || 'http://localhost:3000'}`);
       console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
       console.log(`🔥 Fireblocks integration: ${fireblocksService.isInitialized() ? 'Active' : 'Disabled'}`);
+      console.log(`🗃️ Supabase integration: ${supabaseService.isInitialized() ? 'Active' : 'Disabled'}`);
+      console.log(`📊 Advanced analytics: ${dbQueryService ? 'Available' : 'Disabled'}`);
       
       if (RWATokenABI && PledgeManagerABI) {
         console.log(`📖 Contract info: http://localhost:${PORT}/api/contracts/info`);
+        console.log(`📊 Dashboard: http://localhost:${PORT}/api/dashboard`);
       }
     });
   } catch (error) {

@@ -8,6 +8,7 @@ const Dashboard = ({ onNotify, onRefresh, systemHealth, contractInfo }) => {
     activeTokens: 0,
     totalRevenue: 0
   });
+  const [pledgeManagerBalance, setPledgeManagerBalance] = useState(null);
   const [recentActivity, setRecentActivity] = useState([]);
   const [loading, setLoading] = useState(false);
 
@@ -15,6 +16,7 @@ const Dashboard = ({ onNotify, onRefresh, systemHealth, contractInfo }) => {
     if (contractInfo) {
       updateStats();
     }
+    loadPledgeManagerBalance();
   }, [contractInfo]);
 
   const updateStats = () => {
@@ -28,10 +30,23 @@ const Dashboard = ({ onNotify, onRefresh, systemHealth, contractInfo }) => {
     }
   };
 
+  const loadPledgeManagerBalance = async () => {
+    try {
+      const response = await fetch('/api/admin/pledge-manager-balance');
+      const data = await response.json();
+      if (data.success) {
+        setPledgeManagerBalance(data.usdtBalance);
+      }
+    } catch (error) {
+      console.error('Failed to load PledgeManager balance:', error);
+    }
+  };
+
   const handleRefresh = async () => {
     setLoading(true);
     try {
       await onRefresh();
+      await loadPledgeManagerBalance();
       onNotify('Dashboard refreshed successfully', 'success');
     } catch (error) {
       onNotify('Failed to refresh dashboard', 'error');
@@ -44,11 +59,46 @@ const Dashboard = ({ onNotify, onRefresh, systemHealth, contractInfo }) => {
     try {
       setLoading(true);
       // Use a test address for demo
-      const testAddress = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+      const testAddress = '0x7931edfa6255D59AEe5A65D26E6a7e3CF30E8339';
       const result = await apiService.getFreeUSDT(testAddress);
       onNotify(`Success! ${result.amount} USDT sent to test address`, 'success');
     } catch (error) {
       onNotify('Failed to get test tokens: ' + error.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFundPledgeManager = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch('/api/admin/fund-pledge-manager', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: '500000' })
+      });
+      
+      const result = await response.json();
+      if (result.success) {
+        onNotify(`Funded PledgeManager with ${result.amountTransferred} USDT`, 'success');
+        setPledgeManagerBalance(result.newBalance);
+      } else {
+        throw new Error(result.error || 'Failed to fund PledgeManager');
+      }
+    } catch (error) {
+      onNotify('Failed to fund PledgeManager: ' + error.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const checkPledgeManagerBalance = async () => {
+    try {
+      setLoading(true);
+      await loadPledgeManagerBalance();
+      onNotify('PledgeManager balance updated', 'success');
+    } catch (error) {
+      onNotify('Failed to check balance: ' + error.message, 'error');
     } finally {
       setLoading(false);
     }
@@ -105,6 +155,54 @@ const Dashboard = ({ onNotify, onRefresh, systemHealth, contractInfo }) => {
           {loading ? 'Refreshing...' : '🔄 Refresh'}
         </button>
       </div>
+
+      {/* PledgeManager Balance Alert */}
+      {pledgeManagerBalance !== null && (
+        <div className={`rounded-lg p-4 ${
+          parseFloat(pledgeManagerBalance) < 100000 
+            ? 'bg-red-50 border border-red-200' 
+            : 'bg-green-50 border border-green-200'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <span className="text-2xl mr-3">
+                {parseFloat(pledgeManagerBalance) < 100000 ? '⚠️' : '✅'}
+              </span>
+              <div>
+                <h4 className={`font-medium ${
+                  parseFloat(pledgeManagerBalance) < 100000 ? 'text-red-900' : 'text-green-900'
+                }`}>
+                  PledgeManager USDT Balance
+                </h4>
+                <p className={`text-sm ${
+                  parseFloat(pledgeManagerBalance) < 100000 ? 'text-red-700' : 'text-green-700'
+                }`}>
+                  Current balance: {parseFloat(pledgeManagerBalance).toLocaleString()} USDT
+                  {parseFloat(pledgeManagerBalance) < 100000 && ' (Low balance - fund needed for client payments)'}
+                </p>
+              </div>
+            </div>
+            <div className="flex space-x-2">
+              <button
+                onClick={checkPledgeManagerBalance}
+                disabled={loading}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm font-medium disabled:opacity-50"
+              >
+                Check Balance
+              </button>
+              {parseFloat(pledgeManagerBalance) < 100000 && (
+                <button
+                  onClick={handleFundPledgeManager}
+                  disabled={loading}
+                  className="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded text-sm font-medium disabled:opacity-50"
+                >
+                  Fund PledgeManager
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* System Status */}
       {systemHealth && (
@@ -237,8 +335,16 @@ const Dashboard = ({ onNotify, onRefresh, systemHealth, contractInfo }) => {
         </div>
       )}
 
-      {/* Quick Actions */}
+      {/* Admin Actions */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <ActionCard
+          title="Fund PledgeManager"
+          description="Add USDT to PledgeManager for client payments"
+          buttonText="Fund with 500K USDT"
+          onClick={handleFundPledgeManager}
+          color="yellow"
+        />
+        
         <ActionCard
           title="Get Test USDT"
           description="Get free USDT tokens for testing the platform"
@@ -253,14 +359,6 @@ const Dashboard = ({ onNotify, onRefresh, systemHealth, contractInfo }) => {
           buttonText="Create Pledge"
           onClick={() => window.location.hash = '#pledge'}
           color="blue"
-        />
-        
-        <ActionCard
-          title="View Investments"
-          description="Browse available tokens for investment"
-          buttonText="View Tokens"
-          onClick={() => window.location.hash = '#invest'}
-          color="purple"
         />
       </div>
 
